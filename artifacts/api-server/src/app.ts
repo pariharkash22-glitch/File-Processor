@@ -8,6 +8,7 @@ import { fileURLToPath } from "node:url";
 import { dirname, resolve, join } from "node:path";
 import router from "./routes";
 import { logger } from "./lib/logger";
+import { errorHandler, asyncHandler } from "./middleware/errors";
 
 const app: Express = express();
 
@@ -19,40 +20,40 @@ app.set("trust proxy", 1);
 // ---------------------------------------------------------------------------
 app.use(
   (helmet as any)({
-    contentSecurityPolicy: process.env.NODE_ENV === "production"
-      ? {
-          directives: {
-            defaultSrc: ["'self'"],
-            scriptSrc: ["'self'"],
-            styleSrc: ["'self'", "'unsafe-inline'"], // Tailwind CSS requires this
-            imgSrc: ["'self'", "data:", "blob:"],
-            fontSrc: ["'self'", "data:"],
-            connectSrc: ["'self'"],
-            frameAncestors: ["'none'"],
-          },
-        }
-      : false,
+    contentSecurityPolicy:
+      process.env.NODE_ENV === "production"
+        ? {
+            directives: {
+              defaultSrc: ["'self'"],
+              scriptSrc: ["'self'"],
+              styleSrc: ["'self'", "'unsafe-inline'"], // Tailwind CSS requires this
+              imgSrc: ["'self'", "data:", "blob:"],
+              fontSrc: ["'self'", "data:"],
+              connectSrc: ["'self'"],
+              frameAncestors: ["'none'"],
+            },
+          }
+        : false,
     crossOriginEmbedderPolicy: false, // allow fonts/images from same-origin in SPA
-  }),
+  })
 );
 
 // ---------------------------------------------------------------------------
 // CORS — restrict to configured origin(s) in production
 // ---------------------------------------------------------------------------
-const allowedOrigins = process.env.CORS_ORIGINS
-  ? process.env.CORS_ORIGINS.split(",").map((o) => o.trim())
-  : [];
+const allowedOrigins = process.env.CORS_ORIGINS ? process.env.CORS_ORIGINS.split(",").map((o) => o.trim()) : [];
 
 app.use(
   cors({
-    origin: allowedOrigins.length > 0
-      ? (origin, cb) => {
-          if (!origin || allowedOrigins.includes(origin)) cb(null, true);
-          else cb(new Error(`CORS: origin '${origin}' not allowed`));
-        }
-      : true,
+    origin:
+      allowedOrigins.length > 0
+        ? (origin, cb) => {
+            if (!origin || allowedOrigins.includes(origin)) cb(null, true);
+            else cb(new Error(`CORS: origin '${origin}' not allowed`));
+          }
+        : true,
     credentials: true,
-  }),
+  })
 );
 
 // ---------------------------------------------------------------------------
@@ -70,7 +71,7 @@ app.use((req: Request, res: Response, next: NextFunction) => {
 // Per-endpoint limiters (e.g. login) are tighter and defined in each route.
 // ---------------------------------------------------------------------------
 const globalLimiter = rateLimit({
-  windowMs: 60 * 1000,  // 1 minute window
+  windowMs: 60 * 1000, // 1 minute window
   max: parseInt(process.env.RATE_LIMIT_MAX ?? "300", 10),
   standardHeaders: "draft-8",
   legacyHeaders: false,
@@ -94,7 +95,7 @@ app.use(
         return { statusCode: res.statusCode };
       },
     },
-  }),
+  })
 );
 app.use(express.json({ limit: "1mb" }));
 app.use(express.urlencoded({ extended: true, limit: "1mb" }));
@@ -123,31 +124,43 @@ if (process.env.NODE_ENV === "production") {
 
   // Collector app — must be registered before the root static handler
   app.use("/collector", express.static(collectorDist));
-  app.get("/collector/*", (_req, res) => res.sendFile(join(collectorDist, "index.html")));
+  app.get(
+    "/collector/*",
+    asyncHandler(async (_req, res) => {
+      res.sendFile(join(collectorDist, "index.html"), (err) => {
+        if (err) {
+          logger.error(err, "Failed to serve collector app");
+          res.status(404).json({ error: "Not found" });
+        }
+      });
+    })
+  );
 
   // Bissi main app
   app.use(express.static(bissiDist));
-  app.get("*", (_req, res) => res.sendFile(join(bissiDist, "index.html")));
+  app.get(
+    "*",
+    asyncHandler(async (_req, res) => {
+      res.sendFile(join(bissiDist, "index.html"), (err) => {
+        if (err) {
+          logger.error(err, "Failed to serve bissi app");
+          res.status(404).json({ error: "Not found" });
+        }
+      });
+    })
+  );
 }
+
+// ---------------------------------------------------------------------------
+// 404 handler — must come before global error handler
+// ---------------------------------------------------------------------------
+app.use((req, res) => {
+  res.status(404).json({ error: "Route not found" });
+});
 
 // ---------------------------------------------------------------------------
 // Global error handler — must be last, must have 4 params
 // ---------------------------------------------------------------------------
-// eslint-disable-next-line @typescript-eslint/no-unused-vars
-app.use((err: unknown, _req: Request, res: Response, _next: NextFunction): void => {
-  const message = err instanceof Error ? err.message : "Internal server error";
-  const status = (err as { status?: number }).status ?? 500;
-
-  // Never expose stack traces to clients in production
-  if (process.env.NODE_ENV !== "production") {
-    logger.error(err, "Unhandled error");
-  } else {
-    logger.error({ message, status }, "Unhandled error");
-  }
-
-  if (res.headersSent) return;
-  res.status(status).json({ error: status < 500 ? message : "Internal server error" });
-});
+app.use(errorHandler);
 
 export default app;
-

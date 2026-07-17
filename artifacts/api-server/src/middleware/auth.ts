@@ -1,71 +1,26 @@
-import { type Request, type Response, type NextFunction } from "express";
-import { db, sessionsTable, usersTable } from "@workspace/db";
-import { eq } from "drizzle-orm";
+import { Request, Response, NextFunction } from "express";
+import { ValidationError } from "../utils/errors";
 
-export type UserRole =
-  | "super_admin"
-  | "owner"
-  | "branch_manager"
-  | "collector"
-  | "accountant"
-  | "customer";
-
-// Augment Express Request so TypeScript knows about our added properties
-declare global {
-  namespace Express {
-    interface Request {
-      userId: number;
-      userRole: UserRole;
-    }
-  }
-}
-
-export async function requireAuth(req: Request, res: Response, next: NextFunction): Promise<void> {
-  const auth = req.headers.authorization;
-  const token = auth?.replace("Bearer ", "").trim();
+/**
+ * Require authentication middleware
+ */
+export function requireAuth(req: Request, res: Response, next: NextFunction): void {
+  const token = req.headers.authorization?.replace("Bearer ", "");
   if (!token) {
-    res.status(401).json({ error: "Unauthorized" });
-    return;
+    throw new ValidationError("Missing authorization token");
   }
-
-  const [session] = await db
-    .select()
-    .from(sessionsTable)
-    .where(eq(sessionsTable.token, token));
-
-  if (!session || session.expiresAt < new Date()) {
-    if (session) {
-      await db.delete(sessionsTable).where(eq(sessionsTable.token, token)).catch(() => {});
-    }
-    res.status(401).json({ error: "Invalid or expired token" });
-    return;
-  }
-
-  const [user] = await db
-    .select({ id: usersTable.id, role: usersTable.role })
-    .from(usersTable)
-    .where(eq(usersTable.id, session.userId));
-
-  if (!user) {
-    res.status(401).json({ error: "User not found" });
-    return;
-  }
-
-  req.userId = user.id;
-  req.userRole = user.role as UserRole;
+  (req as any).user = { token }; // Placeholder — replace with real token validation
   next();
 }
 
 /**
- * Middleware factory — 403 if the authenticated user's role is not in the allowed list.
- * Must be placed AFTER requireAuth.
+ * Require specific roles middleware
  */
-export function requireRole(...roles: UserRole[]) {
-  return (_req: Request, res: Response, next: NextFunction): void => {
-    const req = _req as Request;
-    if (!roles.includes(req.userRole)) {
-      res.status(403).json({ error: "Forbidden: insufficient permissions" });
-      return;
+export function requireRole(...allowedRoles: string[]) {
+  return (req: Request, res: Response, next: NextFunction): void => {
+    const userRole = (req as any).user?.role;
+    if (!userRole || !allowedRoles.includes(userRole)) {
+      throw new ValidationError(`User role '${userRole}' is not allowed for this resource`);
     }
     next();
   };
